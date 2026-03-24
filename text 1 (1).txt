@@ -1,0 +1,442 @@
+   -- [[ 1. Clipboard Integration (Runs Once) ]]
+if not _G.DiscordCopied then
+    local setclipboard = setclipboard or tostring
+    pcall(function() setclipboard("https://discord.gg/bm9jvqqcH") end)
+    _G.DiscordCopied = true
+end
+
+-- [[ 2. Anti-Cheat Bypass ]]
+local cachedToken = nil
+pcall(function()
+    local oldNamecall
+    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local s, method = pcall(getnamecallmethod)
+        if not s or not method then return oldNamecall(self, ...) end
+        local args = {...}
+
+        if method == "FireServer" then
+            if args[1] == "ObjRemoved" or args[1] == "WeirdName" or args[1] == "SomethingWrong"
+            or args[1] == "WrongSpeed" or args[1] == "WrongJumpPower" or args[1] == "WrongHipHeight" then
+                return task.wait(9e9)
+            end
+            local ok2, rname = pcall(function() return self.Name end)
+            if ok2 and rname == "PlaceFlag" and typeof(args[2]) == "string" and #args[2] > 10 then
+                if not cachedToken then
+                    cachedToken = args[2]
+                end
+            end
+        end
+        return oldNamecall(self, ...)
+    end)
+end)
+
+-- [[ 3. Rayfield UI Initialization ]]
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Window = Rayfield:CreateWindow({
+   Name = "Minesweeper Auto Solver",
+   Icon = "bomb", -- Added Lucide Icon for Window
+   LoadingTitle = "chocolate Edition",
+   LoadingSubtitle = "by timothy",
+   Theme = "AmberGlow",
+   KeySystem = true, 
+   KeySettings = {
+      Title = "Security Verification",
+      Subtitle = "Join Discord for Key",
+      Note = "Hint: key is in https://discord.gg/bm9jvqqcH",
+      FileName = "MinesweeperKey",
+      SaveKey = true,
+      GrabKeyFromSite = false,
+      Key = {"chocolate"}
+   }
+})
+
+-- [[ 4. Core Logic Setup (From Source) ]]
+local Players = game:GetService("Players")
+local lp = Players.LocalPlayer
+
+local abs, floor, huge, sqrt, max, min = math.abs, math.floor, math.huge, math.sqrt, math.max, math.min
+local tsort, tinsert, tremove = table.sort, table.insert, table.remove
+local vec3, cfnew, inst = Vector3.new, CFrame.new, Instance.new
+
+local S_NumberGui, S_TextLabel, S_BrickColor, S_HRP, S_RightFoot, S_RightLeg, S_ProximityPrompt, S_ClickDetector, S_BasePart, S_PlaceFlag, S_AntiBorder, S_MoonMineHL, S_Part = "NumberGui", "TextLabel", "BrickColor", "HumanoidRootPart", "RightFoot", "Right Leg", "ProximityPrompt", "ClickDetector", "BasePart", "PlaceFlag", "AntiBorder", "MoonMineHL", "Part"
+
+local COLOR_SAFE       = Color3.fromRGB(0,   255, 80)
+local COLOR_MINE       = Color3.fromRGB(255, 0,   0)
+local COLOR_GUESS      = Color3.fromRGB(0,   220, 255)
+
+local solverEnabled, teleportGuessEnabled, autoGuessEnabled = false, false, false
+local antiMinesEnabled, autoWinEnabled, touchTilesEnabled, autoFlagToggle = false, false, false, false
+local teleportDelay, flagDelay, flagRange = 0, 0.02, 50
+
+local state = {
+    cells = { grid = {}, numbered = {}, toFlag = {}, toClear = {} },
+    grid = { w = 0, h = 0 },
+    lastPartCount = -1, dirtyFlag = true, bestGuessCell = nil, lastF = {}, lastS = {}
+}
+
+local changeQueue, queueSet, solverDirty, signalConns = {}, {}, false, {}
+local hlActive, antiMineBarriers, autoFlaggedSet = {}, {}, {}
+
+-- Math/Grid Helpers
+local function cluster(vals, d)
+    local res = {} if #vals == 0 then return res end
+    local cur, count = vals[1], 1
+    for i = 2, #vals do
+        if abs(vals[i] - cur) <= d then
+            count = count + 1; cur = cur + (vals[i] - cur) / count
+        else
+            tinsert(res, cur); cur, count = vals[i], 1
+        end
+    end
+    tinsert(res, cur) return res
+end
+
+local function median(vals)
+    if #vals == 0 then return nil end tsort(vals) return vals[floor((#vals + 1) / 2)]
+end
+
+local function estS(coords)
+    if #coords < 3 then return 4 end local d = {}
+    for i = 2, #coords do d[#d+1] = abs(coords[i] - coords[i-1]) end
+    return median(d) or 4
+end
+
+local function findI(t, s)
+    local bI, bD = 1, huge
+    for i = 1, #s do local d = abs(t - s[i]) if d < bD then bD, bI = d, i end end return bI - 1
+end
+
+local function hasF(p) return p:FindFirstChildOfClass("Model") ~= nil end
+
+local cachedB = nil
+local function scanB()
+    if cachedB and (not cachedB.Parent or #cachedB:GetChildren() == 0) then cachedB = nil; state.lastPartCount = -1 end
+    if cachedB and cachedB.Parent then return cachedB end
+    local f = workspace:FindFirstChild("Flag") local p = f and f:FindFirstChild("Parts")
+    if p then cachedB = p; return p end
+    local ch = workspace:GetChildren()
+    for i = 1, #ch do
+        local v = ch[i]
+        if v:IsA("Folder") and #v:GetChildren() > 50 then
+            local p1 = v:GetChildren()[1]
+            if p1 and p1:IsA(S_BasePart) and p1.Name == S_Part then cachedB = v; return v end
+        end
+    end
+    return nil
+end
+
+-- Highlight System
+local hlFolder = nil
+local function getHLFolder()
+    if hlFolder and hlFolder.Parent then return hlFolder end
+    hlFolder = workspace:FindFirstChild(S_MoonMineHL) or inst("Folder")
+    hlFolder.Name = S_MoonMineHL; hlFolder.Parent = workspace return hlFolder
+end
+
+local function clearAllHL()
+    local f = workspace:FindFirstChild(S_MoonMineHL) if f then f:Destroy() end hlFolder = nil
+    if not state.cells.grid then return end
+    for x = 0, (state.grid.w or 0) - 1 do
+        local col = state.cells.grid[x]
+        if col then for z = 0, (state.grid.h or 0) - 1 do local c = col[z] if c then c.hlPart = nil; c.isHL = false end end end
+    end
+    state.cells.toFlag, state.cells.toClear, state.lastF, state.lastS = {}, {}, {}, {}
+end
+
+local function applyHL(c, col)
+    if not c.part then return end
+    if not c.hlPart then
+        local sg = Instance.new("SurfaceGui")
+        sg.Face = Enum.NormalId.Top; sg.AlwaysOnTop = true; sg.LightInfluence = 0; sg.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud; sg.PixelsPerStud = 20; sg.Parent = c.part
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.fromScale(1, 1); frame.BackgroundTransparency = 0.82; frame.BackgroundColor3 = col; frame.BorderSizePixel = 0; frame.Parent = sg
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = col; stroke.Thickness = 2; stroke.Transparency = 0.1; stroke.Parent = frame
+        c.hlPart = sg; c._hlFrame = frame; c._hlStroke = stroke
+    end
+    c._hlFrame.BackgroundColor3 = col; c._hlFrame.BackgroundTransparency = 0.82; c._hlStroke.Color = col; c.hlPart.Enabled = true; c.isHL = true
+end
+
+local function hideHL(c) if c.hlPart then c.hlPart.Enabled = false end c.isHL = false end
+
+local function isRevealed(c) return c.state == "number" or c.covered == false end
+
+-- Grid Rebuild
+local function rebuildG(folder)
+    clearAllHL()
+    state.cells.grid, state.grid.w, state.grid.h = {}, 0, 0
+    local pts = folder:GetChildren() if #pts == 0 then return end
+
+    local pD, sY = {}, 0
+    for _, p in ipairs(pts) do if p:IsA(S_BasePart) then tinsert(pD, { p = p, pos = p.Position }); sY = sY + p.Position.Y end end
+
+    local xs, zs = {}, {}
+    for i = 1, #pD do xs[i], zs[i] = pD[i].pos.X, pD[i].pos.Z end
+    tsort(xs); tsort(zs)
+
+    local w, h = estS(xs) * 0.6, estS(zs) * 0.6
+    local ux, uz = cluster(xs, w), cluster(zs, h)
+    state.grid.w, state.grid.h = #ux, #uz
+
+    if state.grid.w == 0 or state.grid.h == 0 then return end
+    local ay = sY / #pD
+    for x = 0, state.grid.w - 1 do
+        state.cells.grid[x] = {}
+        for z = 0, state.grid.h - 1 do state.cells.grid[x][z] = { ix = x, iz = z, pos = vec3(ux[x+1], ay, uz[z+1]), part = nil, state = "unknown", covered = true, neigh = {}, hlPart = nil, isHL = false } end
+    end
+
+    for _, d in ipairs(pD) do
+        local xi, zi = findI(d.pos.X, ux), findI(d.pos.Z, uz)
+        local c = state.cells.grid[xi][zi]
+        if not c.part or (d.pos - vec3(ux[xi+1], d.pos.Y, uz[zi+1])).Magnitude < (c.part.Position - vec3(ux[xi+1], c.part.Position.Y, uz[zi+1])).Magnitude then c.part, c.pos = d.p, d.pos end
+    end
+
+    for z = 0, state.grid.h - 1 do
+        for x = 0, state.grid.w - 1 do
+            local c = state.cells.grid[x][z]
+            for dz = -1, 1 do
+                for dx = -1, 1 do
+                    if dx ~= 0 or dz ~= 0 then
+                        local nx, nz = x + dx, z + dz
+                        if nx >= 0 and nx < state.grid.w and nz >= 0 and nz < state.grid.h then tinsert(c.neigh, state.cells.grid[nx][nz]) end
+                    end
+                end
+            end
+        end
+    end
+
+    for _, conn in pairs(signalConns) do conn:Disconnect() end signalConns, changeQueue, queueSet = {}, {}, {}
+
+    for x = 0, state.grid.w - 1 do
+        local col = state.cells.grid[x]
+        if col then
+            for z = 0, state.grid.h - 1 do
+                local c = col[z]
+                if c and c.part then
+                    local part = c.part
+                    signalConns[part] = part:GetPropertyChangedSignal(S_BrickColor):Connect(function()
+                        if not queueSet[c] then queueSet[c] = true; changeQueue[#changeQueue + 1] = c end solverDirty = true
+                    end)
+                    signalConns[c] = part.ChildAdded:Connect(function(child)
+                        if child.Name == S_NumberGui then
+                            c._ng = child if c.hlPart then c.hlPart.Enabled = false end if hlActive then hlActive[c] = nil end
+                            if state.cells.toClear then state.cells.toClear[c] = nil end if state.cells.toFlag then state.cells.toFlag[c] = nil end
+                            if not queueSet[c] then queueSet[c] = true; changeQueue[#changeQueue + 1] = c end solverDirty = true
+                        end
+                    end)
+                    if not queueSet[c] then queueSet[c] = true; changeQueue[#changeQueue + 1] = c end
+                end
+            end
+        end
+    end
+    solverDirty = true
+end
+
+-- Process Queue
+local BATCH_SIZE = 50
+local function processQueue()
+    if #changeQueue == 0 then return end
+    local batch = changeQueue; changeQueue, queueSet = {}, {}
+    local numberedDirty = false; local i = 1
+    while i <= #batch do
+        local limit = math.min(i + BATCH_SIZE - 1, #batch)
+        for j = i, limit do
+            local c = batch[j]
+            if c and c.part and c.state ~= "number" and c.state ~= "flagged" then
+                local ng = c._ng or c.part:FindFirstChild(S_NumberGui)
+                if ng then
+                    if not c._ng then c._ng = ng end
+                    local lbl = c._tl or ng:FindFirstChild(S_TextLabel)
+                    if lbl and not c._tl then c._tl = lbl end
+                    if lbl then
+                        local t = lbl.Text
+                        if t == "" or tonumber(t) then
+                            c.number = tonumber(t) or 0; c.covered = false; c.state = "number"; state.cells.toClear[c] = nil; state.cells.toFlag[c] = nil
+                            if c.hlPart then c.hlPart.Enabled = false end hlActive[c] = nil; numberedDirty = true
+                        end
+                    end
+                end
+            end
+        end
+        i = limit + 1
+        if i <= #batch then task.wait() end
+    end
+
+    if numberedDirty then
+        local numbered = {}
+        for x = 0, state.grid.w - 1 do
+            local col = state.cells.grid[x]
+            if col then for z = 0, state.grid.h - 1 do local c = col[z] if c and c.state == "number" then tinsert(numbered, c) end end end
+        end
+        state.cells.numbered = numbered
+    end
+end
+
+-- Simplified Solve (Pass 1 of Source)
+local function updateL()
+    if state.grid.w == 0 then state.cells.toFlag, state.cells.toClear = {}, {}; return end
+    local num = state.cells.numbered if #num == 0 then return end
+    local fS, sS = {}, {}
+    local changed, iters = true, 0
+    while changed and iters < 10 do
+        changed = false; iters = iters + 1
+        for j = 1, #num do
+            local c = num[j]
+            local unk, flg = {}, 0
+            for _, t in ipairs(c.neigh) do
+                if fS[t] then flg = flg + 1 elseif not sS[t] and t.state ~= "number" and t.covered ~= false then unk[#unk+1] = t end
+            end
+            local r = (c.number or 0) - flg
+            if r > 0 and r == #unk then
+                for _, t in ipairs(unk) do if not fS[t] then fS[t] = true; changed = true end end
+            elseif r == 0 and #unk > 0 then
+                for _, t in ipairs(unk) do if not sS[t] then sS[t] = true; changed = true end end
+            end
+        end
+    end
+    state.cells.toFlag, state.cells.toClear, state.dirtyFlag = fS, sS, true
+end
+
+local function updateH()
+    local toFlag, toClear = state.cells.toFlag, state.cells.toClear
+    for c in pairs(hlActive) do if isRevealed(c) or (not toFlag[c] and not toClear[c]) then hideHL(c); hlActive[c] = nil end end
+    if not solverEnabled then return end
+    for c in pairs(toFlag) do if not isRevealed(c) and not hlActive[c] and c.part and c.part.Parent then applyHL(c, COLOR_MINE); hlActive[c] = true end end
+    for c in pairs(toClear) do if not isRevealed(c) and not hlActive[c] and c.part and c.part.Parent then applyHL(c, COLOR_SAFE); hlActive[c] = true end end
+end
+
+local function clearBarriers() for _, b in pairs(antiMineBarriers) do pcall(function() b:Destroy() end) end antiMineBarriers = {} end
+local function updateBarriers()
+    for cell, b in pairs(antiMineBarriers) do if not state.cells.toFlag[cell] or not b.Parent then pcall(function() b:Destroy() end); antiMineBarriers[cell] = nil end end
+    for cell in pairs(state.cells.toFlag) do
+        if not antiMineBarriers[cell] and cell.part and cell.part.Parent then
+            local p = cell.part; local b = Instance.new("Part"); b.Size = Vector3.new(p.Size.X + 3, 0.7, p.Size.Z + 3); b.CFrame = p.CFrame * CFrame.new(0, p.Size.Y / 2 + 0.4, 0); b.Anchored = true; b.CanCollide = true; b.Transparency = 1; b.CanTouch = false; b.CastShadow = false; b.Name = S_AntiBorder; b.Parent = workspace; antiMineBarriers[cell] = b
+        end
+    end
+end
+
+-- [[ 5. Rayfield Tabs & Toggles (Updated with Lucide Icons) ]]
+local MainTab = Window:CreateTab("Solver", "brain") -- Added "brain" Lucide Icon
+local AutoTab = Window:CreateTab("Automation", "rocket") -- Added "rocket" Lucide Icon
+
+MainTab:CreateSection("Visual Assistance")
+MainTab:CreateToggle({ Name = "Enable Solver Highlights", CurrentValue = false, Callback = function(v) solverEnabled = v; state.dirtyFlag = true if not v then clearAllHL(); state.lastPartCount = -1; state.dirtyFlag = true end end })
+MainTab:CreateToggle({ Name = "Anti Mines Barrier", CurrentValue = false, Callback = function(v) antiMinesEnabled = v if not v then clearBarriers() end end })
+
+AutoTab:CreateSection("Cheats")
+AutoTab:CreateToggle({ Name = "Auto Win (Teleport)", CurrentValue = false, Callback = function(v) autoWinEnabled = v end })
+AutoTab:CreateToggle({ Name = "Tiles Revealer (Touch)", CurrentValue = false, Callback = function(v) touchTilesEnabled = v end })
+AutoTab:CreateToggle({ Name = "Auto Flag Mines", CurrentValue = false, Callback = function(v) autoFlagToggle = v end })
+
+AutoTab:CreateSection("Configuration")
+AutoTab:CreateSlider({ Name = "Teleport Delay", Range = {0, 20}, Increment = 1, Suffix = "x0.1s", CurrentValue = 0, Callback = function(v) teleportDelay = v * 0.1 end })
+AutoTab:CreateSlider({ Name = "Flag Delay", Range = {0, 10}, Increment = 1, Suffix = "x0.1s", CurrentValue = 0, Callback = function(v) flagDelay = v * 0.1 end })
+
+-- [[ 6. Background Threads ]]
+
+-- Token Stealer Thread
+task.spawn(function()
+    task.wait(1)
+    pcall(function()
+        local mouse = game.Players.LocalPlayer:GetMouse()
+        local con = getconnections(mouse.Button1Down)
+        for i, v in next, con do
+            if cachedToken then break end
+            if v.Function then
+                local u = getupvalues(v.Function)
+                for l, d in next, u do if typeof(d) == "string" and #d >= 8 then cachedToken = d; break end end
+            end
+        end
+    end)
+end)
+
+-- Main Solver Loop
+local lastSolveTime, SOLVE_COOLDOWN = 0, 0.15
+task.spawn(function()
+    while true do
+        task.wait(0.1)
+        if cachedB and not cachedB.Parent then
+            cachedB = nil; state.lastPartCount = -1; state.grid.w = 0; state.grid.h = 0; state.cells.grid = {}; state.cells.numbered = {}; state.cells.toFlag = {}; state.cells.toClear = {}; autoFlaggedSet = {}; clearBarriers(); hlActive = {}; changeQueue = {}; queueSet = {}; solverDirty = false; lastSolveTime = 0
+            for _, conn in pairs(signalConns) do conn:Disconnect() end signalConns = {}
+            local f = workspace:FindFirstChild(S_MoonMineHL) if f then f:Destroy() end hlFolder = nil
+        end
+
+        if solverEnabled or antiMinesEnabled or autoWinEnabled or touchTilesEnabled or autoFlagToggle then
+            local folder = scanB()
+            if folder then
+                local pc = #folder:GetChildren()
+                if state.grid.w == 0 or pc ~= state.lastPartCount then
+                    state.lastPartCount = pc
+                    pcall(rebuildG, folder)
+                    task.wait()
+                end
+
+                local now = tick()
+                if state.grid.w > 0 then
+                    if solverDirty and (now - lastSolveTime) >= SOLVE_COOLDOWN then
+                        solverDirty = false; lastSolveTime = now
+                        pcall(processQueue)
+                        task.wait()
+                        pcall(updateL)
+                    end
+                    pcall(updateH)
+
+                    if antiMinesEnabled then task.wait(); pcall(updateBarriers) end
+                end
+            end
+        end
+    end
+end)
+
+-- Auto Win / Touch Thread
+task.spawn(function()
+    while true do task.wait()
+        if autoWinEnabled then
+            for cell in pairs(state.cells.toClear) do
+                if not autoWinEnabled then break end
+                if cell.part and cell.part.Parent and not isRevealed(cell) then
+                    local hrp = lp.Character and lp.Character:FindFirstChild(S_HRP)
+                    if hrp then hrp.CFrame = CFrame.new(cell.part.Position.X, cell.part.Position.Y + cell.part.Size.Y / 2 + 3, cell.part.Position.Z) end
+                    if teleportDelay > 0 then task.wait(teleportDelay) end
+                end
+            end
+        end
+        if touchTilesEnabled then
+            local leg = lp.Character and (lp.Character:FindFirstChild(S_RightFoot) or lp.Character:FindFirstChild(S_HRP))
+            if leg then
+                for cell in pairs(state.cells.toClear) do
+                    if not touchTilesEnabled then break end
+                    if cell.part and cell.part.Parent and not isRevealed(cell) and not state.cells.toFlag[cell] then
+                        pcall(firetouchinterest, leg, cell.part, 0); pcall(firetouchinterest, leg, cell.part, 1)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- Auto Flag Thread
+local FlagRemote = game:GetService("ReplicatedStorage"):WaitForChild("Events"):WaitForChild("FlagEvents"):WaitForChild("PlaceFlag")
+task.spawn(function()
+    while true do task.wait(0.05)
+        if autoFlagToggle and cachedToken then
+            for cell in pairs(state.cells.toFlag) do
+                if not autoFlagToggle then break end
+                if cell.part and cell.part.Parent and not autoFlaggedSet[cell] and not hasF(cell.part) then
+                    autoFlaggedSet[cell] = true
+                    pcall(function() FlagRemote:FireServer(cell.part, cachedToken, true) end)
+                    task.wait(math.max(flagDelay, 0.05))
+                    if not hasF(cell.part) then autoFlaggedSet[cell] = nil end
+                end
+            end
+        end
+    end
+end)
+
+Rayfield:Notify({
+   Title = "Status", 
+   Content = "Minesweeper AmberGlow Ready!", 
+   Duration = 5,
+   Icon = "check" -- Added checkmark icon to the notification
+})
