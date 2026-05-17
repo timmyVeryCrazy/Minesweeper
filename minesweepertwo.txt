@@ -1,0 +1,661 @@
+-- ╔══════════════════════════════════════╗
+--   MINESWEEPER — TOKEN
+-- ╚══════════════════════════════════════╝
+local msToken = tostring(plr.UserId)
+
+task.spawn(function()
+    task.wait(1)
+    local ok, conns = pcall(getconnections, plr:GetMouse().Button1Down)
+    if not ok or not conns then return end
+    for _, conn in next, conns do
+        if conn.Function then
+            local ok2, ups = pcall(getupvalues, conn.Function)
+            if ok2 and ups then
+                for _, v in next, ups do
+                    if typeof(v) == "string" and #v > #msToken then
+                        msToken = v
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- ╔══════════════════════════════════════╗
+--   MINESWEEPER SOLVER LOGIC
+-- ╚══════════════════════════════════════╝
+local abs, floor, huge = math.abs, math.floor, math.huge
+local tsort, tinsert, tremove = table.sort, table.insert, table.remove
+local vec3 = Vector3.new
+
+local COLOR_SAFE  = Color3.fromRGB(0,   255, 80)
+local COLOR_MINE  = Color3.fromRGB(255, 0,   0)
+local COLOR_GUESS = Color3.fromRGB(0,   220, 255)
+
+local solverEnabled    = false
+local autoGuessEnabled = false
+local tilesAuraOn      = false
+local disableBombOn    = false
+local autoFlagOn       = false
+local autoFlaggedSet   = {}
+local flagDelay        = 0.02
+
+local msState = {
+    cells         = { grid = {}, numbered = {}, toFlag = {}, toClear = {} },
+    grid          = { w = 0, h = 0 },
+    lastPartCount = -1,
+}
+
+local changeQueue = {} ; local queueSet    = {}
+local solverDirty = false ; local signalConns = {}
+local hlActive    = {}
+
+-- ── Math helpers ──────────────────────────────────────────────────
+local function cluster(vals, d)
+    local res = {}
+    if #vals == 0 then return res end
+    local cur, count = vals[1], 1
+    for i = 2, #vals do
+        if abs(vals[i] - cur) <= d then
+            count = count + 1 ; cur = cur + (vals[i] - cur) / count
+        else tinsert(res, cur) ; cur, count = vals[i], 1 end
+    end
+    tinsert(res, cur) ; return res
+end
+
+local function median(vals)
+    if #vals == 0 then return nil end
+    tsort(vals) ; return vals[floor((#vals + 1) / 2)]
+end
+
+local function estS(coords)
+    if #coords < 3 then return 4 end
+    local d = {}
+    for i = 2, #coords do d[#d+1] = abs(coords[i] - coords[i-1]) end
+    return median(d) or 4
+end
+
+local function findI(t, s)
+    local bI, bD = 1, huge
+    for i = 1, #s do
+        local d = abs(t - s[i])
+        if d < bD then bD, bI = d, i end
+    end
+    return bI - 1
+end
+
+local function hasF(p) return p:FindFirstChildOfClass("Model") ~= nil end
+
+-- ── Get leg part ──────────────────────────────────────────────────
+local function getLeg()
+    local char = plr.Character
+    if not char then return end
+    return char:FindFirstChild("LeftFoot")
+        or char:FindFirstChild("Left Leg")
+        or char:FindFirstChild("HumanoidRootPart")
+end
+
+-- ── Board scanner ─────────────────────────────────────────────────
+local cachedB = nil
+local function scanB()
+    if cachedB and (not cachedB.Parent or #cachedB:GetChildren() == 0) then
+        cachedB = nil ; msState.lastPartCount = -1
+    end
+    if cachedB and cachedB.Parent then return cachedB end
+    local f = workspace:FindFirstChild("Flag")
+    local p = f and f:FindFirstChild("Parts")
+    if p then cachedB = p ; return p end
+    for _, v in pairs(workspace:GetChildren()) do
+        if v:IsA("Folder") and #v:GetChildren() > 50 then
+            local p1 = v:GetChildren()[1]
+            if p1 and p1:IsA("BasePart") and p1.Name == "Part" then
+                cachedB = v ; return v
+            end
+        end
+    end
+end
+
+-- ── Highlight helpers ─────────────────────────────────────────────
+local hlFolder = nil
+local function clearAllHL()
+    local f = workspace:FindFirstChild("MineHL")
+    if f then f:Destroy() end ; hlFolder = nil
+    for x = 0, (msState.grid.w or 0) - 1 do
+        local col = msState.cells.grid[x]
+        if col then
+            for z = 0, (msState.grid.h or 0) - 1 do
+                local c = col[z]
+                if c then c.hlPart = nil ; c.isHL = false end
+            end
+        end
+    end
+    msState.cells.toFlag = {} ; msState.cells.toClear = {}
+end
+
+local function applyHL(c, col)
+    if not c.part then return end
+    if not c.hlPart then
+        local sg = Instance.new("SurfaceGui")
+        sg.Face = Enum.NormalId.Top ; sg.AlwaysOnTop = true
+        sg.LightInfluence = 0
+        sg.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+        sg.PixelsPerStud = 20 ; sg.Parent = c.part
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.fromScale(1,1) ; frame.BackgroundTransparency = 0.82
+        frame.BackgroundColor3 = col ; frame.BorderSizePixel = 0 ; frame.Parent = sg
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = col ; stroke.Thickness = 2
+        stroke.Transparency = 0.1 ; stroke.Parent = frame
+        c.hlPart = sg ; c._hlFrame = frame ; c._hlStroke = stroke
+    end
+    c._hlFrame.BackgroundColor3 = col
+    c._hlFrame.BackgroundTransparency = 0.82
+    c._hlStroke.Color = col
+    c.hlPart.Enabled = true ; c.isHL = true
+end
+
+local function hideHL(c)
+    if c.hlPart then c.hlPart.Enabled = false end ; c.isHL = false
+end
+
+-- ── Grid rebuild ──────────────────────────────────────────────────
+local function rebuildG(folder)
+    clearAllHL()
+    msState.cells.grid = {} ; msState.grid.w = 0 ; msState.grid.h = 0
+    local pts = folder:GetChildren()
+    if #pts == 0 then return end
+    local pD, sY = {}, 0
+    for _, p in ipairs(pts) do
+        if p:IsA("BasePart") then
+            tinsert(pD, { p = p, pos = p.Position }) ; sY = sY + p.Position.Y
+        end
+    end
+    local xs, zs = {}, {}
+    for i = 1, #pD do xs[i], zs[i] = pD[i].pos.X, pD[i].pos.Z end
+    tsort(xs) ; tsort(zs)
+    local w, h = estS(xs) * 0.6, estS(zs) * 0.6
+    local ux, uz = cluster(xs, w), cluster(zs, h)
+    msState.grid.w, msState.grid.h = #ux, #uz
+    if msState.grid.w == 0 or msState.grid.h == 0 then return end
+    local ay = sY / #pD
+    for x = 0, msState.grid.w - 1 do
+        msState.cells.grid[x] = {}
+        for z = 0, msState.grid.h - 1 do
+            msState.cells.grid[x][z] = {
+                ix = x, iz = z, pos = vec3(ux[x+1], ay, uz[z+1]),
+                part = nil, state = "unknown", covered = true,
+                neigh = {}, hlPart = nil, isHL = false,
+            }
+        end
+    end
+    for _, d in ipairs(pD) do
+        local xi = findI(d.pos.X, ux) ; local zi = findI(d.pos.Z, uz)
+        local c = msState.cells.grid[xi][zi]
+        if not c.part then c.part, c.pos = d.p, d.pos end
+    end
+    for z = 0, msState.grid.h - 1 do
+        for x = 0, msState.grid.w - 1 do
+            local c = msState.cells.grid[x][z]
+            for dz = -1, 1 do for dx = -1, 1 do
+                if dx ~= 0 or dz ~= 0 then
+                    local nx, nz = x+dx, z+dz
+                    if nx >= 0 and nx < msState.grid.w and nz >= 0 and nz < msState.grid.h then
+                        tinsert(c.neigh, msState.cells.grid[nx][nz])
+                    end
+                end
+            end end
+        end
+    end
+    for _, conn in pairs(signalConns) do conn:Disconnect() end
+    signalConns = {} ; changeQueue = {} ; queueSet = {}
+    for x = 0, msState.grid.w - 1 do
+        local col = msState.cells.grid[x]
+        if col then
+            for z = 0, msState.grid.h - 1 do
+                local c = col[z]
+                if c and c.part then
+                    local part = c.part
+                    signalConns[part] = part:GetPropertyChangedSignal("BrickColor"):Connect(function()
+                        if not queueSet[c] then queueSet[c]=true ; changeQueue[#changeQueue+1]=c end
+                        for _, nb in ipairs(c.neigh) do
+                            if not queueSet[nb] then queueSet[nb]=true ; changeQueue[#changeQueue+1]=nb end
+                        end
+                        solverDirty = true
+                    end)
+                    signalConns[part.."ng"] = part.ChildAdded:Connect(function(child)
+                        if child.Name == "NumberGui" then
+                            if c.hlPart then c.hlPart.Enabled = false end
+                            hlActive[c] = nil
+                            msState.cells.toClear[c] = nil ; msState.cells.toFlag[c] = nil
+                            if not queueSet[c] then queueSet[c]=true ; changeQueue[#changeQueue+1]=c end
+                            solverDirty = true
+                        end
+                    end)
+                end
+            end
+        end
+    end
+    for x = 0, msState.grid.w - 1 do
+        local col = msState.cells.grid[x]
+        if col then
+            for z = 0, msState.grid.h - 1 do
+                local c = col[z]
+                if c and not queueSet[c] then queueSet[c]=true ; changeQueue[#changeQueue+1]=c end
+            end
+        end
+    end
+    solverDirty = true
+end
+
+-- ── Queue processor ───────────────────────────────────────────────
+local BATCH_SIZE = 200
+local function processQueue()
+    if #changeQueue == 0 then return end
+    local batch = changeQueue ; changeQueue = {} ; queueSet = {}
+    local i = 1
+    while i <= #batch do
+        local limit = math.min(i + BATCH_SIZE - 1, #batch)
+        for j = i, limit do
+            local c = batch[j]
+            if c and c.part and c.state ~= "number" and c.state ~= "flagged" then
+                local ng = c._ng or c.part:FindFirstChild("NumberGui")
+                if ng and not c._ng then c._ng = ng end
+                if ng then
+                    local lbl = c._tl or ng:FindFirstChild("TextLabel")
+                    if lbl and not c._tl then c._tl = lbl end
+                    if lbl then
+                        local t = lbl.Text
+                        if t == "" or tonumber(t) then
+                            c.number = tonumber(t) or 0 ; c.covered = false ; c.state = "number"
+                            msState.cells.toClear[c] = nil ; msState.cells.toFlag[c] = nil
+                            hideHL(c) ; hlActive[c] = nil
+                        end
+                    end
+                end
+            end
+        end
+        i = limit + 1 ; if i <= #batch then task.wait() end
+    end
+    local numbered = {}
+    for x = 0, msState.grid.w - 1 do
+        local col = msState.cells.grid[x]
+        if col then
+            for z = 0, msState.grid.h - 1 do
+                local c = col[z]
+                if c and c.state == "number" then
+                    tinsert(numbered, c)
+                    msState.cells.toClear[c] = nil ; msState.cells.toFlag[c] = nil
+                    if c.hlPart then c.hlPart.Enabled = false ; hlActive[c] = nil end
+                end
+            end
+        end
+    end
+    msState.cells.numbered = numbered
+end
+
+-- ── CSP solver ────────────────────────────────────────────────────
+local function getC(num, fS, sS)
+    local bds, map = {}, {}
+    for j = 1, #num do
+        local nc = num[j] ; local ns, n = {}, nc.neigh
+        for k = 1, #n do
+            local t = n[k]
+            if not fS[t] and t.state ~= "number" and t.covered ~= false and not sS[t] then
+                tinsert(ns, t)
+                if not map[t] then map[t] = true ; tinsert(bds, t) end
+            end
+        end
+        nc._cn = ns
+    end
+    local adj, vis, comps = {}, {}, {}
+    for j = 1, #bds do adj[bds[j]] = {} end
+    for j = 1, #num do
+        local ns = num[j]._cn
+        for i = 1, #ns do for k = i+1, #ns do
+            local u, v = ns[i], ns[k]
+            adj[u][v], adj[v][u] = true, true
+        end end
+    end
+    for j = 1, #bds do
+        local u = bds[j]
+        if not vis[u] then
+            local comp, q = {}, {u} ; vis[u] = true
+            while #q > 0 do
+                local cur = tremove(q) ; tinsert(comp, cur)
+                for nb in pairs(adj[cur] or {}) do
+                    if not vis[nb] then vis[nb] = true ; tinsert(q, nb) end
+                end
+            end
+            tinsert(comps, comp)
+        end
+    end
+    return comps
+end
+
+local function solveCSP(fS, sS)
+    local num = msState.cells.numbered
+    for j = 1, #num do
+        local nc = num[j] ; local r, n = nc.number or 0, nc.neigh
+        for k = 1, #n do if fS[n[k]] then r = r - 1 end end ; nc._cr = r
+    end
+    local comps = getC(num, fS, sS) ; if #comps == 0 then return end
+    local totalVisited = 0 ; local HARD_CAP = 1000
+    for i = 1, #comps do
+        if totalVisited > HARD_CAP then break end
+        local v = comps[i] ; local nV = #v
+        if nV > 0 and nV <= 20 then
+            local map, cCts = {}, {}
+            for j = 1, nV do map[v[j]] = j ; cCts[j] = 0 end
+            local cons = {}
+            for j = 1, #num do
+                local nc = num[j] ; local cv = {}
+                for k = 1, #nc._cn do
+                    local m = map[nc._cn[k]] ; if m then cv[#cv+1] = m end
+                end
+                if #cv > 0 then cons[#cons+1] = { vars=cv, need=nc._cr, undecided=#cv } end
+            end
+            local v2c = {}
+            for ci = 1, #cons do
+                for _, vi in ipairs(cons[ci].vars) do
+                    v2c[vi] = v2c[vi] or {} ; v2c[vi][#v2c[vi]+1] = ci
+                end
+            end
+            local asg = {} ; local solC = 0 ; local cnt = {}
+            for j = 1, nV do cnt[j] = 0 end
+            local function apply(ci, isMine)
+                local c = cons[ci]
+                if isMine then c.need = c.need - 1 end
+                c.undecided = c.undecided - 1
+                return not (c.need < 0 or c.need > c.undecided)
+            end
+            local function rec(idx)
+                if totalVisited > HARD_CAP then return end
+                totalVisited = totalVisited + 1
+                if idx > nV then
+                    solC = solC + 1
+                    for j = 1, nV do if asg[j] == 1 then cnt[j] = cnt[j] + 1 end end
+                    return
+                end
+                local clist = v2c[idx] or {}
+                for m0 = 0, 1 do
+                    local snaps = {} ; local ok = true
+                    for _, ci in ipairs(clist) do
+                        local con = cons[ci]
+                        snaps[#snaps+1] = { ci=ci, need=con.need, undecided=con.undecided }
+                        if not apply(ci, m0==1) then ok=false ; break end
+                    end
+                    if ok then asg[idx]=m0 ; rec(idx+1) ; asg[idx]=nil end
+                    for s = #snaps, 1, -1 do
+                        local sn = snaps[s]
+                        cons[sn.ci].need=sn.need ; cons[sn.ci].undecided=sn.undecided
+                    end
+                    if totalVisited > HARD_CAP then break end
+                end
+            end
+            rec(1)
+            if solC > 0 then
+                for vi = 1, nV do
+                    if cnt[vi] == solC then fS[v[vi]] = true end
+                    if cnt[vi] == 0    then sS[v[vi]] = true end
+                    v[vi]._prob = cnt[vi] / solC
+                end
+            end
+        end
+    end
+end
+
+local function updateL()
+    if msState.grid.w == 0 then msState.cells.toFlag,msState.cells.toClear={},{} ; return end
+    local num = msState.cells.numbered ; if #num == 0 then return end
+    local fS, sS = {}, {}
+    for j = 1, #num do for _, nb in ipairs(num[j].neigh) do nb._prob = nil end end
+    local changed = true ; local iters = 0
+    while changed and iters < 10 do
+        changed = false ; iters = iters + 1
+        for j = 1, #num do
+            local c = num[j] ; local unk, flg = {}, 0
+            for _, t in ipairs(c.neigh) do
+                if fS[t] then flg = flg + 1
+                elseif not sS[t] and t.state ~= "number" and t.covered ~= false then unk[#unk+1]=t end
+            end
+            local r = (c.number or 0) - flg
+            if r > 0 and r == #unk then
+                for _, t in ipairs(unk) do if not fS[t] then fS[t]=true ; changed=true end end
+            elseif r == 0 and #unk > 0 then
+                for _, t in ipairs(unk) do if not sS[t] then sS[t]=true ; changed=true end end
+            end
+        end
+    end
+    solveCSP(fS, sS)
+    msState.cells.toFlag = fS ; msState.cells.toClear = sS
+end
+
+local function isRevealed(c) return c.state == "number" or c.covered == false end
+
+local function updateH()
+    local toFlag = msState.cells.toFlag ; local toClear = msState.cells.toClear
+    for c in pairs(hlActive) do
+        if isRevealed(c) or (not toFlag[c] and not toClear[c]) then
+            hideHL(c) ; hlActive[c] = nil
+        end
+    end
+    if not solverEnabled then return end
+    for c in pairs(toFlag) do
+        if not isRevealed(c) and not hlActive[c] and c.part and c.part.Parent then
+            applyHL(c, COLOR_MINE) ; hlActive[c] = true
+        end
+    end
+    for c in pairs(toClear) do
+        if not isRevealed(c) and not hlActive[c] and c.part and c.part.Parent then
+            applyHL(c, COLOR_SAFE) ; hlActive[c] = true
+        end
+    end
+    if autoGuessEnabled and #msState.cells.numbered > 0 then
+        local best, bestP = nil, huge
+        for x = 0, msState.grid.w - 1 do
+            local col = msState.cells.grid[x]
+            if col then
+                for z = 0, msState.grid.h - 1 do
+                    local gc = col[z]
+                    if gc and gc.part and gc.part.Parent
+                    and not isRevealed(gc) and not toFlag[gc] and not toClear[gc] then
+                        local p = gc._prob or 0.5
+                        if p < bestP then bestP = p ; best = gc end
+                    end
+                end
+            end
+        end
+        if best then applyHL(best, COLOR_GUESS) ; hlActive[best] = true end
+    end
+end
+
+-- ╔══════════════════════════════════════╗
+--   MINESWEEPER TAB UI
+--   Icon: upload imgur image to Roblox
+--   then replace 0000000000 below
+-- ╚══════════════════════════════════════╝
+local MinesweeperTab = Window:Tab({
+    Title = "Minesweeper",
+    Icon  = "rbxassetid://0000000000", -- ← paste your uploaded asset ID here
+})
+
+MinesweeperTab:Section({ Title = "Solver" })
+
+MinesweeperTab:Toggle({
+    Title    = "Auto Solver",
+    Desc     = "Red = mine  |  Green = safe  |  Cyan = best guess",
+    Value    = false,
+    Callback = function(v)
+        solverEnabled = v
+        if not v then clearAllHL() ; msState.lastPartCount = -1 end
+    end,
+})
+MinesweeperTab:Toggle({
+    Title    = "Auto Guess",
+    Desc     = "Highlights safest unknown tile when stuck",
+    Value    = false,
+    Callback = function(v) autoGuessEnabled = v end,
+})
+
+-- ── Tiles Aura ────────────────────────────────────────────────────
+MinesweeperTab:Section({ Title = "Tiles Aura" })
+
+MinesweeperTab:Toggle({
+    Title    = "Tiles Aura",
+    Desc     = "Fires leg touch on every confirmed safe tile to reveal it",
+    Value    = false,
+    Callback = function(v) tilesAuraOn = v end,
+})
+
+-- ── Disable Bomb Touch ────────────────────────────────────────────
+MinesweeperTab:Section({ Title = "Safety" })
+
+MinesweeperTab:Toggle({
+    Title    = "Disable Bomb Touch",
+    Desc     = "Fires touch-end on mine tiles each frame so they never trigger",
+    Value    = false,
+    Callback = function(v) disableBombOn = v end,
+})
+
+-- ── Auto Flag ─────────────────────────────────────────────────────
+MinesweeperTab:Section({ Title = "Auto Flag" })
+
+local FlagRemote
+pcall(function()
+    FlagRemote = RepStorage:WaitForChild("Events",5)
+        :WaitForChild("FlagEvents",5)
+        :WaitForChild("PlaceFlag",5)
+end)
+
+MinesweeperTab:Toggle({
+    Title    = "Auto Flag Mines",
+    Desc     = "Fires PlaceFlag remote on every detected mine",
+    Value    = false,
+    Callback = function(v)
+        autoFlagOn = v
+        if not v then autoFlaggedSet = {} end
+    end,
+})
+MinesweeperTab:Slider({
+    Title    = "Flag Delay",
+    Desc     = "Delay between placements (x0.1s)",
+    Step     = 1,
+    Value    = { Min = 0, Max = 20, Default = 0 },
+    Callback = function(v) flagDelay = v * 0.1 end,
+})
+
+-- ╔══════════════════════════════════════╗
+--   TILES AURA + DISABLE BOMB LOOP
+-- ╚══════════════════════════════════════╝
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+        local leg = getLeg()
+
+        -- Tiles Aura: firetouchinterest leg on every safe tile
+        if tilesAuraOn and leg then
+            for cell in pairs(msState.cells.toClear) do
+                if cell.part and cell.part.Parent and not isRevealed(cell) then
+                    pcall(function()
+                        firetouchinterest(leg, cell.part, 0) -- touch begin
+                        firetouchinterest(leg, cell.part, 1) -- touch end
+                    end)
+                end
+            end
+        end
+
+        -- Disable Bomb Touch: continuously fire touch-end on mine tiles
+        -- so any ongoing touch event is immediately cancelled
+        if disableBombOn and leg then
+            for cell in pairs(msState.cells.toFlag) do
+                if cell.part and cell.part.Parent then
+                    pcall(function()
+                        firetouchinterest(leg, cell.part, 1) -- touch end = untouched
+                    end)
+                end
+            end
+        end
+    end
+end)
+
+-- ╔══════════════════════════════════════╗
+--   AUTO FLAG LOOP
+-- ╚══════════════════════════════════════╝
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+        if autoFlagOn and FlagRemote then
+            local char   = plr.Character
+            local hrp    = char and char:FindFirstChild("HumanoidRootPart")
+            local origin = hrp and hrp.Position
+            local candidates = {}
+            for cell in pairs(msState.cells.toFlag) do
+                if cell.part and cell.part.Parent
+                and not autoFlaggedSet[cell] and not hasF(cell.part) then
+                    local dist = origin and (origin - cell.part.Position).Magnitude or 0
+                    tinsert(candidates, { cell = cell, dist = dist })
+                end
+            end
+            tsort(candidates, function(a, b) return a.dist < b.dist end)
+            for _, entry in ipairs(candidates) do
+                local cell = entry.cell
+                if not autoFlagOn then break end
+                if cell.part and cell.part.Parent
+                and not autoFlaggedSet[cell] and not hasF(cell.part) then
+                    autoFlaggedSet[cell] = true
+                    pcall(function() FlagRemote:FireServer(cell.part, msToken, true) end)
+                    task.wait(math.max(flagDelay, 0.02))
+                    if not hasF(cell.part) then autoFlaggedSet[cell] = nil end
+                end
+            end
+        end
+    end
+end)
+
+-- ╔══════════════════════════════════════╗
+--   SOLVER MAIN LOOP
+-- ╚══════════════════════════════════════╝
+local SOLVE_COOLDOWN = 0.15
+local lastSolveTime  = 0
+
+task.spawn(function()
+    while true do
+        task.wait(0.1)
+        if cachedB and not cachedB.Parent then
+            cachedB = nil ; msState.lastPartCount = -1
+            msState.grid.w = 0 ; msState.grid.h = 0
+            msState.cells.grid = {} ; msState.cells.numbered = {}
+            msState.cells.toFlag = {} ; msState.cells.toClear = {}
+            autoFlaggedSet = {} ; hlActive = {} ; solverDirty = false
+            lastSolveTime = 0
+            for _, conn in pairs(signalConns) do conn:Disconnect() end
+            signalConns = {}
+            local f = workspace:FindFirstChild("MineHL")
+            if f then f:Destroy() end ; hlFolder = nil
+        end
+        if solverEnabled or autoGuessEnabled or autoFlagOn or tilesAuraOn or disableBombOn then
+            local folder = scanB()
+            if folder then
+                local pc = #folder:GetChildren()
+                local needRebuild = msState.grid.w == 0 or pc ~= msState.lastPartCount
+                if needRebuild then
+                    msState.lastPartCount = pc
+                    for _, conn in pairs(signalConns) do conn:Disconnect() end
+                    signalConns = {} ; changeQueue = {} ; queueSet = {}
+                    hlActive = {} ; msState.cells.toFlag = {} ; msState.cells.toClear = {}
+                    msState.cells.numbered = {} ; autoFlaggedSet = {}
+                    solverDirty = false ; lastSolveTime = 0
+                    pcall(rebuildG, folder) ; task.wait()
+                end
+                local now = tick()
+                if msState.grid.w > 0 then
+                    if solverDirty and (now - lastSolveTime) >= SOLVE_COOLDOWN then
+                        solverDirty = false ; lastSolveTime = now
+                        pcall(processQueue) ; task.wait() ; pcall(updateL)
+                    end
+                    pcall(updateH)
+                end
+            end
+        end
+    end
+end)
