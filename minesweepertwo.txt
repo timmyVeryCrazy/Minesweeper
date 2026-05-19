@@ -1,29 +1,201 @@
--- ╔══════════════════════════════════════╗
---   MINESWEEPER — TOKEN
--- ╚══════════════════════════════════════╝
-local msToken = tostring(plr.UserId)
+if getgenv().WindScript then return end
+getgenv().WindScript = true
 
-task.spawn(function()
-    task.wait(1)
-    local ok, conns = pcall(getconnections, plr:GetMouse().Button1Down)
-    if not ok or not conns then return end
-    for _, conn in next, conns do
-        if conn.Function then
-            local ok2, ups = pcall(getupvalues, conn.Function)
-            if ok2 and ups then
-                for _, v in next, ups do
-                    if typeof(v) == "string" and #v > #msToken then
-                        msToken = v
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/timmyVeryCrazy/UiLibrary/refs/heads/main/customWindui"))()
+
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local RepStorage = game:GetService("ReplicatedStorage")
+local UIS        = game:GetService("UserInputService")
+
+local plr = Players.LocalPlayer
+if not plr then
+    Players.PlayerAdded:Connect(function(p) plr = p end)
+    repeat task.wait() until plr
+end
+
+-- â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+--   THEME
+-- â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+WindUI:AddTheme({
+    Name = "Monochrome",
+    Accent                       = Color3.fromHex("#18181b"),
+    Background                   = Color3.fromHex("#101010"),
+    BackgroundTransparency       = 0,
+    Outline                      = Color3.fromHex("#FFFFFF"),
+    Text                         = Color3.fromHex("#FFFFFF"),
+    Placeholder                  = Color3.fromHex("#7a7a7a"),
+    Button                       = Color3.fromHex("#52525b"),
+    Icon                         = Color3.fromHex("#a1a1aa"),
+    Hover                        = Color3.fromHex("#FFFFFF"),
+    WindowBackground             = Color3.fromHex("#101010"),
+    WindowShadow                 = Color3.fromHex("#000000"),
+    WindowTopbarButtonIcon       = Color3.fromHex("#a1a1aa"),
+    WindowTopbarTitle            = Color3.fromHex("#FFFFFF"),
+    WindowTopbarAuthor           = Color3.fromHex("#FFFFFF"),
+    WindowTopbarIcon             = Color3.fromHex("#FFFFFF"),
+    TabBackground                = Color3.fromHex("#18181b"),
+    TabTitle                     = Color3.fromHex("#FFFFFF"),
+    TabIcon                      = Color3.fromHex("#a1a1aa"),
+    ElementBackground            = Color3.fromHex("#27272a"),
+    ElementTitle                 = Color3.fromHex("#FFFFFF"),
+    ElementDesc                  = Color3.fromHex("#a1a1aa"),
+    ElementIcon                  = Color3.fromHex("#a1a1aa"),
+    PopupBackground              = Color3.fromHex("#101010"),
+    PopupBackgroundTransparency  = 0,
+    PopupTitle                   = Color3.fromHex("#FFFFFF"),
+    PopupContent                 = Color3.fromHex("#FFFFFF"),
+    PopupIcon                    = Color3.fromHex("#a1a1aa"),
+    DialogBackground             = Color3.fromHex("#101010"),
+    DialogBackgroundTransparency = 0,
+    DialogTitle                  = Color3.fromHex("#FFFFFF"),
+    DialogContent                = Color3.fromHex("#FFFFFF"),
+    DialogIcon                   = Color3.fromHex("#a1a1aa"),
+    Toggle                       = Color3.fromHex("#52525b"),
+    ToggleBar                    = Color3.fromHex("#FFFFFF"),
+    Checkbox                     = Color3.fromHex("#52525b"),
+    CheckboxIcon                 = Color3.fromHex("#FFFFFF"),
+    Slider                       = Color3.fromHex("#52525b"),
+    SliderThumb                  = Color3.fromHex("#FFFFFF"),
+})
+
+-- â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+--   WINDOW
+-- â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+local Window = WindUI:CreateWindow({
+    Title       = "Blockerman's Minesweeper",
+    Icon        = "bomb",
+    Author      = "timmy",
+    Folder      = "WindScript",
+    Size        = UDim2.fromOffset(550, 600),
+    Transparent = false,
+    Theme       = "Monochrome",
+    HasTopBar   = true,
+    ToggleKey   = Enum.KeyCode.RightShift,
+})
+
+local PlayerTab      = Window:Tab({ Title = "Player",      Icon = "user" })
+local MinesweeperTab = Window:Tab({ Title = "Minesweeper", Icon = "bomb" })
+
+MinesweeperTab:Select()
+
+-- â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+--   PLAYER TAB
+-- â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+local speedOn = false ; local speedVal = 16
+local jumpOn  = false ; local jumpVal  = 50
+local ijOn    = false ; local noclipOn = false
+local speedThread, jumpThread, noclipThread, ijConn
+
+PlayerTab:Section({ Title = "Movement" })
+
+PlayerTab:Slider({ Title = "Walk Speed", Step = 1,
+    Value = { Min = 1, Max = 300, Default = 16 },
+    Callback = function(v) speedVal = v end })
+
+PlayerTab:Toggle({ Title = "Speed Hack", Value = false,
+    Callback = function(v)
+        speedOn = v
+        if speedThread then task.cancel(speedThread) speedThread = nil end
+        if v then
+            speedThread = task.spawn(function()
+                while speedOn do
+                    local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+                    if hum then hum.WalkSpeed = speedVal end
+                    task.wait(0.1)
+                end
+            end)
+        else
+            local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.WalkSpeed = 16 end
+        end
+    end })
+
+PlayerTab:Slider({ Title = "Jump Power", Step = 1,
+    Value = { Min = 1, Max = 500, Default = 50 },
+    Callback = function(v) jumpVal = v end })
+
+PlayerTab:Toggle({ Title = "Jump Power Hack", Value = false,
+    Callback = function(v)
+        jumpOn = v
+        if jumpThread then task.cancel(jumpThread) jumpThread = nil end
+        if v then
+            jumpThread = task.spawn(function()
+                while jumpOn do
+                    local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+                    if hum then hum.JumpPower = jumpVal end
+                    task.wait(0.1)
+                end
+            end)
+        else
+            local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.JumpPower = 50 end
+        end
+    end })
+
+PlayerTab:Toggle({ Title = "Infinite Jump", Value = false,
+    Callback = function(v)
+        ijOn = v
+        if ijConn then ijConn:Disconnect() ijConn = nil end
+        if v then
+            ijConn = UIS.JumpRequest:Connect(function()
+                local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+                if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+            end)
+        end
+    end })
+
+PlayerTab:Toggle({ Title = "Noclip", Value = false,
+    Callback = function(v)
+        noclipOn = v
+        if noclipThread then task.cancel(noclipThread) noclipThread = nil end
+        if v then
+            noclipThread = task.spawn(function()
+                while noclipOn do
+                    local char = plr.Character
+                    if char then
+                        for _, p in pairs(char:GetDescendants()) do
+                            if p:IsA("BasePart") then p.CanCollide = false end
+                        end
                     end
+                    task.wait()
+                end
+            end)
+        else
+            local char = plr.Character
+            if char then
+                for _, p in pairs(char:GetDescendants()) do
+                    if p:IsA("BasePart") then p.CanCollide = true end
                 end
             end
         end
+    end })
+
+-- â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+--   TOKEN
+--   MouseControl Button1Down upvalues:
+--   1=raycast  2=mouse(v3)  3=Parts
+--   4=ReplicatedStorage  5=v2(token)
+--   connection [2] is the PC Button1Down
+-- â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+local msToken = plr.UserId  -- numeric fallback
+
+task.spawn(function()
+    repeat task.wait() until plr
+    task.wait(2)  -- let MouseControl finish connecting
+    local ok, conns = pcall(getconnections, plr:GetMouse().Button1Down)
+    if not ok or not conns or not conns[2] then return end
+    local fn = conns[2].Function
+    if not fn then return end
+    local ok2, token = pcall(getupvalue, fn, 5)
+    if ok2 and token and typeof(token) == "number" then
+        msToken = token
     end
 end)
 
--- ╔══════════════════════════════════════╗
---   MINESWEEPER SOLVER LOGIC
--- ╚══════════════════════════════════════╝
+-- â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+--   SOLVER LOGIC
+-- â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 local abs, floor, huge = math.abs, math.floor, math.huge
 local tsort, tinsert, tremove = table.sort, table.insert, table.remove
 local vec3 = Vector3.new
@@ -50,7 +222,6 @@ local changeQueue = {} ; local queueSet    = {}
 local solverDirty = false ; local signalConns = {}
 local hlActive    = {}
 
--- ── Math helpers ──────────────────────────────────────────────────
 local function cluster(vals, d)
     local res = {}
     if #vals == 0 then return res end
@@ -62,19 +233,16 @@ local function cluster(vals, d)
     end
     tinsert(res, cur) ; return res
 end
-
 local function median(vals)
     if #vals == 0 then return nil end
     tsort(vals) ; return vals[floor((#vals + 1) / 2)]
 end
-
 local function estS(coords)
     if #coords < 3 then return 4 end
     local d = {}
     for i = 2, #coords do d[#d+1] = abs(coords[i] - coords[i-1]) end
     return median(d) or 4
 end
-
 local function findI(t, s)
     local bI, bD = 1, huge
     for i = 1, #s do
@@ -84,18 +252,18 @@ local function findI(t, s)
     return bI - 1
 end
 
+-- Flagged tile = has a Model child (e.g. "Red" flag model)
 local function hasF(p) return p:FindFirstChildOfClass("Model") ~= nil end
 
--- ── Get leg part ──────────────────────────────────────────────────
 local function getLeg()
-    local char = plr.Character
+    local char = plr and plr.Character
     if not char then return end
     return char:FindFirstChild("LeftFoot")
         or char:FindFirstChild("Left Leg")
         or char:FindFirstChild("HumanoidRootPart")
 end
 
--- ── Board scanner ─────────────────────────────────────────────────
+-- Board: workspace.Flag.Parts (confirmed from decompile)
 local cachedB = nil
 local function scanB()
     if cachedB and (not cachedB.Parent or #cachedB:GetChildren() == 0) then
@@ -115,11 +283,9 @@ local function scanB()
     end
 end
 
--- ── Highlight helpers ─────────────────────────────────────────────
-local hlFolder = nil
 local function clearAllHL()
     local f = workspace:FindFirstChild("MineHL")
-    if f then f:Destroy() end ; hlFolder = nil
+    if f then f:Destroy() end
     for x = 0, (msState.grid.w or 0) - 1 do
         local col = msState.cells.grid[x]
         if col then
@@ -153,12 +319,10 @@ local function applyHL(c, col)
     c._hlStroke.Color = col
     c.hlPart.Enabled = true ; c.isHL = true
 end
-
 local function hideHL(c)
     if c.hlPart then c.hlPart.Enabled = false end ; c.isHL = false
 end
 
--- ── Grid rebuild ──────────────────────────────────────────────────
 local function rebuildG(folder)
     clearAllHL()
     msState.cells.grid = {} ; msState.grid.w = 0 ; msState.grid.h = 0
@@ -247,7 +411,6 @@ local function rebuildG(folder)
     solverDirty = true
 end
 
--- ── Queue processor ───────────────────────────────────────────────
 local BATCH_SIZE = 200
 local function processQueue()
     if #changeQueue == 0 then return end
@@ -257,7 +420,8 @@ local function processQueue()
         local limit = math.min(i + BATCH_SIZE - 1, #batch)
         for j = i, limit do
             local c = batch[j]
-            if c and c.part and c.state ~= "number" and c.state ~= "flagged" then
+            if c and c.part and c.state ~= "number"
+            and c.state ~= "flagged" and c.state ~= "mine" then
                 local ng = c._ng or c.part:FindFirstChild("NumberGui")
                 if ng and not c._ng then c._ng = ng end
                 if ng then
@@ -265,7 +429,12 @@ local function processQueue()
                     if lbl and not c._tl then c._tl = lbl end
                     if lbl then
                         local t = lbl.Text
-                        if t == "" or tonumber(t) then
+                        if t == "X" then
+                            -- blown mine tile â€” skip from solver
+                            c.state = "mine" ; c.covered = false
+                            msState.cells.toClear[c] = nil ; msState.cells.toFlag[c] = nil
+                            hideHL(c) ; hlActive[c] = nil
+                        elseif t == "" or tonumber(t) then
                             c.number = tonumber(t) or 0 ; c.covered = false ; c.state = "number"
                             msState.cells.toClear[c] = nil ; msState.cells.toFlag[c] = nil
                             hideHL(c) ; hlActive[c] = nil
@@ -293,14 +462,14 @@ local function processQueue()
     msState.cells.numbered = numbered
 end
 
--- ── CSP solver ────────────────────────────────────────────────────
 local function getC(num, fS, sS)
     local bds, map = {}, {}
     for j = 1, #num do
         local nc = num[j] ; local ns, n = {}, nc.neigh
         for k = 1, #n do
             local t = n[k]
-            if not fS[t] and t.state ~= "number" and t.covered ~= false and not sS[t] then
+            if not fS[t] and t.state ~= "number" and t.state ~= "mine"
+            and t.covered ~= false and not sS[t] then
                 tinsert(ns, t)
                 if not map[t] then map[t] = true ; tinsert(bds, t) end
             end
@@ -416,7 +585,8 @@ local function updateL()
             local c = num[j] ; local unk, flg = {}, 0
             for _, t in ipairs(c.neigh) do
                 if fS[t] then flg = flg + 1
-                elseif not sS[t] and t.state ~= "number" and t.covered ~= false then unk[#unk+1]=t end
+                elseif not sS[t] and t.state ~= "number"
+                and t.state ~= "mine" and t.covered ~= false then unk[#unk+1]=t end
             end
             local r = (c.number or 0) - flg
             if r > 0 and r == #unk then
@@ -430,7 +600,9 @@ local function updateL()
     msState.cells.toFlag = fS ; msState.cells.toClear = sS
 end
 
-local function isRevealed(c) return c.state == "number" or c.covered == false end
+local function isRevealed(c)
+    return c.state == "number" or c.state == "mine" or c.covered == false
+end
 
 local function updateH()
     local toFlag = msState.cells.toFlag ; local toClear = msState.cells.toClear
@@ -469,123 +641,111 @@ local function updateH()
     end
 end
 
--- ╔══════════════════════════════════════╗
+-- â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
 --   MINESWEEPER TAB UI
---   Icon: upload imgur image to Roblox
---   then replace 0000000000 below
--- ╚══════════════════════════════════════╝
-local MinesweeperTab = Window:Tab({
-    Title = "Minesweeper",
-    Icon  = "rbxassetid://0000000000", -- ← paste your uploaded asset ID here
-})
-
+-- â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 MinesweeperTab:Section({ Title = "Solver" })
 
 MinesweeperTab:Toggle({
-    Title    = "Auto Solver",
-    Desc     = "Red = mine  |  Green = safe  |  Cyan = best guess",
-    Value    = false,
+    Title = "Auto Solver",
+    Desc  = "Red = mine  |  Green = safe  |  Cyan = best guess",
+    Value = false,
     Callback = function(v)
         solverEnabled = v
         if not v then clearAllHL() ; msState.lastPartCount = -1 end
     end,
 })
 MinesweeperTab:Toggle({
-    Title    = "Auto Guess",
-    Desc     = "Highlights safest unknown tile when stuck",
-    Value    = false,
+    Title = "Auto Guess",
+    Desc  = "Highlights safest unknown tile when stuck",
+    Value = false,
     Callback = function(v) autoGuessEnabled = v end,
 })
 
--- ── Tiles Aura ────────────────────────────────────────────────────
 MinesweeperTab:Section({ Title = "Tiles Aura" })
 
 MinesweeperTab:Toggle({
-    Title    = "Tiles Aura",
-    Desc     = "Fires leg touch on every confirmed safe tile to reveal it",
-    Value    = false,
+    Title = "Tiles Aura",
+    Desc  = "firetouchinterest leg on every confirmed safe tile",
+    Value = false,
     Callback = function(v) tilesAuraOn = v end,
 })
 
--- ── Disable Bomb Touch ────────────────────────────────────────────
 MinesweeperTab:Section({ Title = "Safety" })
 
 MinesweeperTab:Toggle({
-    Title    = "Disable Bomb Touch",
-    Desc     = "Fires touch-end on mine tiles each frame so they never trigger",
-    Value    = false,
+    Title = "Disable Bomb Touch",
+    Desc  = "firetouchinterest touch-end on mines each frame",
+    Value = false,
     Callback = function(v) disableBombOn = v end,
 })
 
--- ── Auto Flag ─────────────────────────────────────────────────────
 MinesweeperTab:Section({ Title = "Auto Flag" })
 
+-- PlaceFlag: FireServer(part, token, true)
+-- token = numeric Salasana value (upvalue 5 of Button1Down[2])
 local FlagRemote
 pcall(function()
-    FlagRemote = RepStorage:WaitForChild("Events",5)
-        :WaitForChild("FlagEvents",5)
-        :WaitForChild("PlaceFlag",5)
+    FlagRemote = RepStorage
+        :WaitForChild("Events", 5)
+        :WaitForChild("FlagEvents", 5)
+        :WaitForChild("PlaceFlag", 5)
 end)
 
 MinesweeperTab:Toggle({
-    Title    = "Auto Flag Mines",
-    Desc     = "Fires PlaceFlag remote on every detected mine",
-    Value    = false,
+    Title = "Auto Flag Mines",
+    Desc  = "Fires PlaceFlag on every confirmed mine",
+    Value = false,
     Callback = function(v)
         autoFlagOn = v
         if not v then autoFlaggedSet = {} end
     end,
 })
 MinesweeperTab:Slider({
-    Title    = "Flag Delay",
-    Desc     = "Delay between placements (x0.1s)",
-    Step     = 1,
-    Value    = { Min = 0, Max = 20, Default = 0 },
+    Title = "Flag Delay",
+    Desc  = "Delay between flags (x0.1s)",
+    Step  = 1,
+    Value = { Min = 0, Max = 20, Default = 0 },
     Callback = function(v) flagDelay = v * 0.1 end,
 })
 
--- ╔══════════════════════════════════════╗
---   TILES AURA + DISABLE BOMB LOOP
--- ╚══════════════════════════════════════╝
+-- â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
+--   TILES AURA + DISABLE BOMB
+-- â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 task.spawn(function()
     while true do
         task.wait(0.05)
         local leg = getLeg()
 
-        -- Tiles Aura: firetouchinterest leg on every safe tile
+        -- Tiles Aura: firetouchinterest leg on safe tiles
         if tilesAuraOn and leg then
             for cell in pairs(msState.cells.toClear) do
                 if cell.part and cell.part.Parent and not isRevealed(cell) then
-                    pcall(function()
-                        firetouchinterest(leg, cell.part, 0) -- touch begin
-                        firetouchinterest(leg, cell.part, 1) -- touch end
-                    end)
+                    pcall(firetouchinterest, leg, cell.part, 0)  -- touch begin
+                    pcall(firetouchinterest, leg, cell.part, 1)  -- touch end
                 end
             end
         end
 
-        -- Disable Bomb Touch: continuously fire touch-end on mine tiles
-        -- so any ongoing touch event is immediately cancelled
+        -- Disable Bomb Touch: fire touch-end on mine tiles constantly
         if disableBombOn and leg then
             for cell in pairs(msState.cells.toFlag) do
                 if cell.part and cell.part.Parent then
-                    pcall(function()
-                        firetouchinterest(leg, cell.part, 1) -- touch end = untouched
-                    end)
+                    pcall(firetouchinterest, leg, cell.part, 1)
                 end
             end
         end
     end
 end)
 
--- ╔══════════════════════════════════════╗
+-- â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
 --   AUTO FLAG LOOP
--- ╚══════════════════════════════════════╝
+-- â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 task.spawn(function()
     while true do
         task.wait(0.05)
         if autoFlagOn and FlagRemote then
-            local char   = plr.Character
+            local char   = plr and plr.Character
             local hrp    = char and char:FindFirstChild("HumanoidRootPart")
             local origin = hrp and hrp.Position
             local candidates = {}
@@ -603,7 +763,7 @@ task.spawn(function()
                 if cell.part and cell.part.Parent
                 and not autoFlaggedSet[cell] and not hasF(cell.part) then
                     autoFlaggedSet[cell] = true
-                    pcall(function() FlagRemote:FireServer(cell.part, msToken, true) end)
+                    pcall(FlagRemote.FireServer, FlagRemote, cell.part, msToken, true)
                     task.wait(math.max(flagDelay, 0.02))
                     if not hasF(cell.part) then autoFlaggedSet[cell] = nil end
                 end
@@ -612,9 +772,9 @@ task.spawn(function()
     end
 end)
 
--- ╔══════════════════════════════════════╗
+-- â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
 --   SOLVER MAIN LOOP
--- ╚══════════════════════════════════════╝
+-- â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 local SOLVE_COOLDOWN = 0.15
 local lastSolveTime  = 0
 
@@ -631,7 +791,7 @@ task.spawn(function()
             for _, conn in pairs(signalConns) do conn:Disconnect() end
             signalConns = {}
             local f = workspace:FindFirstChild("MineHL")
-            if f then f:Destroy() end ; hlFolder = nil
+            if f then f:Destroy() end
         end
         if solverEnabled or autoGuessEnabled or autoFlagOn or tilesAuraOn or disableBombOn then
             local folder = scanB()
